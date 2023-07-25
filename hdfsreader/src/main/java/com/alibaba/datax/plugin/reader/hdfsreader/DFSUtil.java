@@ -1,6 +1,7 @@
 package com.alibaba.datax.plugin.reader.hdfsreader;
 
 import com.alibaba.datax.common.element.*;
+import com.alibaba.datax.common.element.Record;
 import com.alibaba.datax.common.exception.DataXException;
 import com.alibaba.datax.common.plugin.RecordSender;
 import com.alibaba.datax.common.plugin.TaskPluginCollector;
@@ -31,6 +32,11 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import parquet.example.data.Group;
+import parquet.hadoop.ParquetFileReader;
+import parquet.hadoop.ParquetReader;
+import parquet.hadoop.example.GroupReadSupport;
+import parquet.hadoop.metadata.ParquetMetadata;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -41,7 +47,8 @@ import java.util.*;
 /**
  * Created by mingya.wmy on 2015/8/12.
  */
-public class DFSUtil {
+public class
+DFSUtil {
     private static final Logger LOG = LoggerFactory.getLogger(HdfsReader.Job.class);
 
     private org.apache.hadoop.conf.Configuration hadoopConf = null;
@@ -331,33 +338,123 @@ public class DFSUtil {
                 //If the network disconnected, will retry 45 times, each time the retry interval for 20 seconds
                 //Each file as a split
                 //TODO multy threads
-                // OrcInputFormat getSplits params numSplits not used, splits size = block numbers
-                InputSplit[] splits = in.getSplits(conf, -1);
-                for (InputSplit split : splits) {
-                    {
-                        RecordReader reader = in.getRecordReader(split, conf, Reporter.NULL);
-                        Object key = reader.createKey();
-                        Object value = reader.createValue();
-                        // 获取列信息
-                        List<? extends StructField> fields = inspector.getAllStructFieldRefs();
+                InputSplit[] splits = in.getSplits(conf, 1);
 
-                        List<Object> recordFields;
-                        while (reader.next(key, value)) {
-                            recordFields = new ArrayList<Object>();
+                RecordReader reader = in.getRecordReader(splits[0], conf, Reporter.NULL);
+                Object key = reader.createKey();
+                Object value = reader.createValue();
+                // 获取列信息
+                List<? extends StructField> fields = inspector.getAllStructFieldRefs();
 
-                            for (int i = 0; i <= columnIndexMax; i++) {
-                                Object field = inspector.getStructFieldData(value, fields.get(i));
-                                recordFields.add(field);
-                            }
-                            transportOneRecord(column, recordFields, recordSender,
-                                    taskPluginCollector, isReadAllColumns, nullFormat);
-                        }
-                        reader.close();
+                List<Object> recordFields;
+                while (reader.next(key, value)) {
+                    recordFields = new ArrayList<Object>();
+
+                    for (int i = 0; i <= columnIndexMax; i++) {
+                        Object field = inspector.getStructFieldData(value, fields.get(i));
+                        recordFields.add(field);
                     }
+                    transportOneRecord(column, recordFields, recordSender,
+                            taskPluginCollector, isReadAllColumns, nullFormat);
                 }
+                reader.close();
             } catch (Exception e) {
                 String message = String.format("从orcfile文件路径[%s]中读取数据发生异常，请联系系统管理员。"
                         , sourceOrcFilePath);
+                LOG.error(message);
+                throw DataXException.asDataXException(HdfsReaderErrorCode.READ_FILE_ERROR, message);
+            }
+        } else {
+            String message = String.format("请确认您所读取的列配置正确！columnIndexMax 小于0,column:%s", JSON.toJSONString(column));
+            throw DataXException.asDataXException(HdfsReaderErrorCode.BAD_CONFIG_VALUE, message);
+        }
+    }
+
+    public void parquetFileStartRead(String sourceParquetFilePath, Configuration readerSliceConfig,
+                                     RecordSender recordSender, TaskPluginCollector taskPluginCollector) {
+        LOG.info(String.format("Start Read parquetfile [%s].", sourceParquetFilePath));
+        List<ColumnEntry> column = UnstructuredStorageReaderUtil
+                .getListColumnEntry(readerSliceConfig, com.alibaba.datax.plugin.unstructuredstorage.reader.Key.COLUMN);
+        String nullFormat = readerSliceConfig.getString(com.alibaba.datax.plugin.unstructuredstorage.reader.Key.NULL_FORMAT);
+        StringBuilder allColumns = new StringBuilder();
+        StringBuilder allColumnTypes = new StringBuilder();
+        boolean isReadAllColumns = false;
+        int columnIndexMax = -1;
+        // 判断是否读取所有列
+        if (null == column || column.size() == 0) {
+            int allColumnsCount = getParquetAllColumnsCount(sourceParquetFilePath);
+            columnIndexMax = allColumnsCount - 1;
+            isReadAllColumns = true;
+        } else {
+            columnIndexMax = getMaxIndex(column);
+        }
+        for (int i = 0; i <= columnIndexMax; i++) {
+            allColumns.append("col");
+            allColumnTypes.append("string");
+            if (i != columnIndexMax) {
+                allColumns.append(",");
+                allColumnTypes.append(":");
+            }
+        }
+        if (columnIndexMax >= 0) {
+            JobConf conf = new JobConf(hadoopConf);
+            Path parquetFilePath = new Path(sourceParquetFilePath);
+            Properties p = new Properties();
+            p.setProperty("columns", allColumns.toString());
+            p.setProperty("columns.types", allColumnTypes.toString());
+
+            try {
+
+                //方式1：不采用。原因：使用ParquetHiveSerDe 读取时，会将parquet中的String类型字段读取成BytesWritable，但难以转换为String
+//                ParquetHiveSerDe serde = new ParquetHiveSerDe();
+//                serde.initialize(conf, p);
+//                StructObjectInspector inspector = (StructObjectInspector) serde.getObjectInspector();
+//                InputFormat<?, ?> in = new MapredParquetInputFormat();
+//                FileInputFormat.setInputPaths(conf, parquetFilePath.toString());
+//
+//                //If the network disconnected, will retry 45 times, each time the retry interval for 20 seconds
+//                //Each file as a split
+//                //TODO multy threads
+//                InputSplit[] splits = in.getSplits(conf, 1);
+//
+//                RecordReader reader = in.getRecordReader(splits[0], conf, Reporter.NULL);
+//                Object key = reader.createKey();
+//                Object value = reader.createValue();
+//                // 获取列信息
+//                List<? extends StructField> fields = inspector.getAllStructFieldRefs();
+//
+//                List<Object> recordFields;
+//                while (reader.next(key, value)) {
+//                    recordFields = new ArrayList<Object>();
+//
+//                    for (int i = 0; i <= columnIndexMax; i++) {
+//                        Object field = inspector.getStructFieldData(value, fields.get(i));
+//                        recordFields.add(field);
+//                    }
+//                    transportOneRecord(column, recordFields, recordSender,
+//                            taskPluginCollector, isReadAllColumns, nullFormat);
+//                }
+
+
+                //方式2：采用。使用Parquet的javaAPI进行读取
+                GroupReadSupport support = new GroupReadSupport();
+                ParquetReader<Group> reader = ParquetReader.builder(support, parquetFilePath).build();
+                Group line = null ;
+                List<Object> recordFields;
+                while((line = reader.read()) != null ){
+                    recordFields = new ArrayList<Object>();
+                    //从line中获取每个字段
+                    for (int i = 0; i <= columnIndexMax; i++) {
+                        Object field = line.getValueToString(i, 0);
+                        recordFields.add(field);
+                    }
+                    transportOneRecord(column, recordFields, recordSender,
+                            taskPluginCollector, isReadAllColumns, nullFormat);
+                }
+                reader.close();
+            } catch (Exception e) {
+                String message = String.format("从parquetfile文件路径[%s]中读取数据发生异常，请联系系统管理员。"
+                        , sourceParquetFilePath);
                 LOG.error(message);
                 throw DataXException.asDataXException(HdfsReaderErrorCode.READ_FILE_ERROR, message);
             }
@@ -391,8 +488,9 @@ public class DFSUtil {
                     String columnValue = null;
 
                     if (null != columnIndex) {
-                        if (null != recordFields.get(columnIndex))
+                        if (null != recordFields.get(columnIndex)) {
                             columnValue = recordFields.get(columnIndex).toString();
+                        }
                     } else {
                         columnValue = columnConst;
                     }
@@ -500,6 +598,17 @@ public class DFSUtil {
         }
     }
 
+    private int getParquetAllColumnsCount(String filePath) {
+        Path path = new Path(filePath);
+        try {
+            ParquetMetadata readerFooter = ParquetFileReader.readFooter(hadoopConf, path);
+            return readerFooter.getFileMetaData().getSchema().getColumns().size();
+        } catch (IOException e) {
+            String message = "读取parquetfile column列数失败，请联系系统管理员";
+            throw DataXException.asDataXException(HdfsReaderErrorCode.READ_FILE_ERROR, message);
+        }
+    }
+
     private int getMaxIndex(List<ColumnEntry> columnConfigs) {
         int maxIndex = -1;
         for (ColumnEntry columnConfig : columnConfigs) {
@@ -543,12 +652,19 @@ public class DFSUtil {
                 if (isSEQ) {
                     return false;
                 }
-                // 如果不是ORC,RC和SEQ,则默认为是TEXT或CSV类型
-                return !isORC && !isRC && !isSEQ;
+                boolean isPAR = isParquetFile(filepath, in);// 判断是否是 PARQUET File
+                if (isPAR) {
+                    return false;
+                }
+                // 如果不是ORC,RC和SEQ,PARQUET,则默认为是TEXT或CSV类型
+                return !isORC && !isRC && !isSEQ && !isPAR;
 
             } else if (StringUtils.equalsIgnoreCase(specifiedFileType, Constant.ORC)) {
 
                 return isORCFile(file, fs, in);
+            } else if (StringUtils.equalsIgnoreCase(specifiedFileType, Constant.PARQUET)) {
+
+                return isParquetFile(filepath, in);
             } else if (StringUtils.equalsIgnoreCase(specifiedFileType, Constant.RC)) {
 
                 return isRCFile(filepath, in);
@@ -693,4 +809,21 @@ public class DFSUtil {
         return false;
     }
 
+    // 判断file是否是Parquet file
+    private boolean isParquetFile(String filepath, FSDataInputStream in) {
+        byte[] PAR_MAGIC = new byte[]{(byte) 'P', (byte) 'A', (byte) 'R', (byte) '1'};
+        byte[] magic = new byte[PAR_MAGIC.length];
+        try {
+            in.seek(0);
+            in.readFully(magic);
+            if (Arrays.equals(magic, PAR_MAGIC)) {
+                return true;
+            } else {
+                return false;
+            }
+        } catch (IOException e) {
+            LOG.info(String.format("检查文件类型: [%s] 不是Parquet File.", filepath));
+        }
+        return false;
+    }
 }

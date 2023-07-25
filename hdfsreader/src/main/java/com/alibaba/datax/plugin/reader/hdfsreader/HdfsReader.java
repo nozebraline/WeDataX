@@ -78,6 +78,7 @@ public class HdfsReader extends Reader {
 
             specifiedFileType = this.readerOriginConfig.getNecessaryValue(Key.FILETYPE, HdfsReaderErrorCode.REQUIRED_VALUE);
             if( !specifiedFileType.equalsIgnoreCase(Constant.ORC) &&
+                    !specifiedFileType.equalsIgnoreCase(Constant.PARQUET) &&
                     !specifiedFileType.equalsIgnoreCase(Constant.TEXT) &&
                     !specifiedFileType.equalsIgnoreCase(Constant.CSV) &&
                     !specifiedFileType.equalsIgnoreCase(Constant.SEQ) &&
@@ -267,6 +268,9 @@ public class HdfsReader extends Reader {
                 }else if(specifiedFileType.equalsIgnoreCase(Constant.ORC)){
 
                     dfsUtil.orcFileStartRead(sourceFile, this.taskConfig, recordSender, this.getTaskPluginCollector());
+                }else if(specifiedFileType.equalsIgnoreCase(Constant.PARQUET)){
+
+                    dfsUtil.parquetFileStartRead(sourceFile, this.taskConfig, recordSender, this.getTaskPluginCollector());
                 }else if(specifiedFileType.equalsIgnoreCase(Constant.SEQ)){
 
                     dfsUtil.sequenceFileStartRead(sourceFile, this.taskConfig, recordSender, this.getTaskPluginCollector());
